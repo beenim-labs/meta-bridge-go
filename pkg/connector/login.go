@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"os"
 	"slices"
 	"time"
 
@@ -22,6 +23,17 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/messagix/useragent"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
+
+// loginDebugLog writes debug messages to both zerolog and a debug file
+func loginDebugLog(log zerolog.Logger, msg string) {
+	log.Debug().Msg("[LOGIN-DEBUG] " + msg)
+	// Also write to file for investigation
+	f, err := os.OpenFile("logs/meta_bridge_login.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.WriteString(fmt.Sprintf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05.000"), msg))
+		f.Close()
+	}
+}
 
 const (
 	FlowIDFacebookCookies  = "facebook"
@@ -164,6 +176,7 @@ func cookieListToFields(cookies []cookies.MetaCookieName, domain string) []bridg
 }
 
 func (m *MetaCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
+	loginDebugLog(m.User.Log, fmt.Sprintf("Start() called for mode=%s user=%s", m.Mode, m.User.MXID))
 	step := &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeCookies,
 		StepID:       LoginStepIDCookies,
@@ -188,6 +201,7 @@ func (m *MetaCookieLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error
 	default:
 		return nil, fmt.Errorf("unknown mode %s", m.Mode)
 	}
+	loginDebugLog(m.User.Log, fmt.Sprintf("Start() returning step: stepID=%s url=%s", step.StepID, step.CookiesParams.URL))
 	return step, nil
 }
 
@@ -293,6 +307,10 @@ func loginWithCookies(
 }
 
 func (m *MetaCookieLogin) SubmitCookies(ctx context.Context, strCookies map[string]string) (*bridgev2.LoginStep, error) {
+	loginDebugLog(m.User.Log, fmt.Sprintf("SubmitCookies() called with %d cookies for user=%s", len(strCookies), m.User.MXID))
+	for key := range strCookies {
+		loginDebugLog(m.User.Log, fmt.Sprintf("  Cookie received: %s", key))
+	}
 	c := &cookies.Cookies{Platform: m.Mode}
 	strCookiesCopy := map[cookies.MetaCookieName]string{}
 	for key, val := range strCookies {
@@ -302,6 +320,7 @@ func (m *MetaCookieLogin) SubmitCookies(ctx context.Context, strCookies map[stri
 
 	missingCookies := c.GetMissingCookieNames()
 	if len(missingCookies) > 0 {
+		loginDebugLog(m.User.Log, fmt.Sprintf("Missing cookies detected: %v", missingCookies))
 		return nil, ErrLoginMissingCookies.AppendMessage(": %v", missingCookies)
 	}
 
