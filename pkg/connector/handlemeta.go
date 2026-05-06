@@ -146,6 +146,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 				Error:      MetaConnectError24,
 			}
 			if m.canReconnect() {
+				m.metaState.StateEvent = status.StateTransientDisconnect
 				log.Debug().Msg("Doing full reconnect after ConnectionCode(24)")
 				go m.FullReconnect()
 			}
