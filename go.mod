@@ -13,11 +13,11 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.0
 	github.com/mattn/go-colorable v0.1.14
-	github.com/rs/zerolog v1.35.0
+	github.com/rs/zerolog v1.35.1
 	github.com/tidwall/gjson v1.18.0
 	github.com/zyedidia/clipboard v1.0.4
 	go.mau.fi/libsignal v0.2.1
-	go.mau.fi/util v0.9.9-0.20260424160448-fd0d9737ad38
+	go.mau.fi/util v0.9.9-0.20260505143909-8e67f0d355e0
 	go.mau.fi/whatsmeow v0.0.0-20260416104156-3ff20cd3462a
 	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
@@ -25,7 +25,7 @@ require (
 	golang.org/x/net v0.53.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
-	maunium.net/go/mautrix v0.27.1-0.20260429060852-d7aad0e862c7
+	maunium.net/go/mautrix v0.27.1-0.20260507135742-7ec18e08eac3
 )
 
 require (
@@ -36,7 +36,7 @@ require (
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-sqlite3 v1.14.42 // indirect
+	github.com/mattn/go-sqlite3 v1.14.44 // indirect
 	github.com/petermattis/goid v0.0.0-20260330135022-df67b199bc81 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
