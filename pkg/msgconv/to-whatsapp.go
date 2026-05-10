@@ -253,23 +253,6 @@ func (mc *MessageConverter) reuploadMediaToWhatsApp(ctx context.Context, evt *ev
 		}
 		mimeType = "audio/mp4"
 		fileName += ".m4a"
-	} else if mimeType == "image/gif" && content.MsgType == event.MsgImage && ffmpeg.Supported() {
-		data, err = ffmpeg.ConvertBytes(ctx, data, ".mp4", []string{"-f", "gif"}, []string{
-			"-pix_fmt", "yuv420p", "-c:v", "libx264", "-movflags", "+faststart",
-			"-filter:v", "crop='floor(in_w/2)*2:floor(in_h/2)*2'",
-		}, mimeType)
-		if err != nil {
-			return nil, "", fmt.Errorf("%w gif to mp4: %w", bridgev2.ErrMediaConvertFailed, err)
-		}
-		mimeType = "video/mp4"
-		fileName += ".mp4"
-		content.MsgType = event.MsgVideo
-		customInfo, ok := evt.Content.Raw["info"].(map[string]any)
-		if !ok {
-			customInfo = make(map[string]any)
-			evt.Content.Raw["info"] = customInfo
-		}
-		customInfo["fi.mau.gif"] = true
 	}
 	if content.MsgType == event.MsgImage && mimeType == "image/png" {
 		cfg, err := png.DecodeConfig(bytes.NewReader(data))
@@ -286,6 +269,11 @@ func (mc *MessageConverter) reuploadMediaToWhatsApp(ctx context.Context, evt *ev
 	if content.MsgType == event.MsgImage && content.Info.Width == 0 {
 		cfg, _, _ := image.DecodeConfig(bytes.NewReader(data))
 		content.Info.Width, content.Info.Height = cfg.Width, cfg.Height
+	}
+	// Facebook is weird and wants gifs to be sent in a VideoMessage (but not as a video/mp4)
+	if content.MsgType == event.MsgImage && mimeType == "image/gif" {
+		content.MsgType = event.MsgVideo
+		content.Info.MauGIF = true
 	}
 	mediaType := msgToMediaType(content.MsgType)
 	client := ctx.Value(contextKeyWAClient).(*whatsmeow.Client)
@@ -359,9 +347,14 @@ func (mc *MessageConverter) wrapWhatsAppMedia(
 		videoMsg := &waConsumerApplication.ConsumerApplication_VideoMessage{
 			Caption: caption,
 		}
-		customInfo, _ := evt.Content.Raw["info"].(map[string]any)
-		isGif, _ := customInfo["fi.mau.gif"].(bool)
-
+		var seconds *uint32
+		if content.Info.Duration != 0 {
+			seconds = proto.Uint32(uint32(content.Info.Duration / 1000))
+		}
+		var gifPlayback *bool
+		if content.Info.MauGIF {
+			gifPlayback = proto.Bool(true)
+		}
 		err = videoMsg.Set(&waMediaTransport.VideoTransport{
 			Integral: &waMediaTransport.VideoTransport_Integral{
 				Transport: reuploaded,
@@ -369,8 +362,8 @@ func (mc *MessageConverter) wrapWhatsAppMedia(
 			Ancillary: &waMediaTransport.VideoTransport_Ancillary{
 				Height:      proto.Uint32(uint32(content.Info.Height)),
 				Width:       proto.Uint32(uint32(content.Info.Width)),
-				Seconds:     proto.Uint32(uint32(content.Info.Duration / 1000)),
-				GifPlayback: &isGif,
+				Seconds:     seconds,
+				GifPlayback: gifPlayback,
 			},
 		})
 		output = &waConsumerApplication.ConsumerApplication_Content_VideoMessage{VideoMessage: videoMsg}

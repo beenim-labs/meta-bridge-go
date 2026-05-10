@@ -59,8 +59,9 @@ type VerifyThreadExistsEvent struct {
 }
 
 var (
-	_ bridgev2.RemoteChatResyncWithInfo       = (*VerifyThreadExistsEvent)(nil)
-	_ bridgev2.RemoteEventThatMayCreatePortal = (*VerifyThreadExistsEvent)(nil)
+	_ bridgev2.RemoteChatResyncWithInfo               = (*VerifyThreadExistsEvent)(nil)
+	_ bridgev2.RemoteEventThatMayCreatePortal         = (*VerifyThreadExistsEvent)(nil)
+	_ bridgev2.RemoteEventWithUncertainPortalReceiver = (*VerifyThreadExistsEvent)(nil)
 )
 
 func (evt *VerifyThreadExistsEvent) GetType() bridgev2.RemoteEventType {
@@ -75,6 +76,10 @@ func (evt *VerifyThreadExistsEvent) GetPortalKey() networkid.PortalKey {
 	return evt.m.makeFBPortalKey(evt.ThreadKey, evt.ThreadType)
 }
 
+func (evt *VerifyThreadExistsEvent) PortalReceiverIsUncertain() bool {
+	return evt.ThreadType == table.UNKNOWN_THREAD_TYPE
+}
+
 func (evt *VerifyThreadExistsEvent) AddLogContext(c zerolog.Context) zerolog.Context {
 	return c.
 		Int64("thread_id", evt.ThreadKey).
@@ -87,7 +92,7 @@ func (evt *VerifyThreadExistsEvent) GetSender() bridgev2.EventSender {
 }
 
 func (evt *VerifyThreadExistsEvent) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	if portal.MXID == "" {
+	if portal.MXID == "" && evt.ThreadType != table.FOLDER {
 		if portal.Metadata.(*metaid.PortalMetadata).FetchAttempted.Swap(true) {
 			zerolog.Ctx(ctx).Warn().Msg("Not resending create request for thread that was already requested")
 			return nil, fmt.Errorf("thread resync was already requested")
@@ -107,7 +112,7 @@ func (evt *VerifyThreadExistsEvent) GetChatInfo(ctx context.Context, portal *bri
 			zerolog.Ctx(ctx).Trace().Any("response", resp).Msg("Requested full thread info")
 		}
 	}
-	return evt.m.makeMinimalChatInfo(evt.ThreadKey, evt.ThreadType), nil
+	return evt.m.makeMinimalChatInfo(evt.ThreadKey, evt.ThreadType, evt.ParentThreadKey), nil
 }
 
 type FBMessageEvent struct {
@@ -497,7 +502,7 @@ func (evt *WAMessageEvent) GetStreamOrder() int64 {
 }
 
 func (evt *WAMessageEvent) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
-	return evt.m.Main.MsgConv.WhatsAppToMatrix(ctx, portal, evt.m.E2EEClient, intent, evt.GetID(), evt.FBMessage), nil
+	return evt.m.Main.MsgConv.WhatsAppToMatrix(ctx, portal, evt.m.Client, evt.m.E2EEClient, intent, evt.GetID(), evt.FBMessage), nil
 }
 
 func (evt *WAMessageEvent) ConvertEdit(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, existing []*database.Message) (*bridgev2.ConvertedEdit, error) {
@@ -548,13 +553,16 @@ type FBChatResync struct {
 	UpsertID  int64
 	m         *MetaClient
 
+	UncertainReceiver bool
+
 	filled bool
 }
 
 var (
-	_ bridgev2.RemoteChatResyncWithInfo       = (*FBChatResync)(nil)
-	_ bridgev2.RemoteEventThatMayCreatePortal = (*FBChatResync)(nil)
-	_ bridgev2.RemoteChatResyncBackfillBundle = (*FBChatResync)(nil)
+	_ bridgev2.RemoteChatResyncWithInfo               = (*FBChatResync)(nil)
+	_ bridgev2.RemoteEventThatMayCreatePortal         = (*FBChatResync)(nil)
+	_ bridgev2.RemoteChatResyncBackfillBundle         = (*FBChatResync)(nil)
+	_ bridgev2.RemoteEventWithUncertainPortalReceiver = (*FBChatResync)(nil)
 )
 
 func (r *FBChatResync) GetType() bridgev2.RemoteEventType {
@@ -563,6 +571,10 @@ func (r *FBChatResync) GetType() bridgev2.RemoteEventType {
 
 func (r *FBChatResync) GetPortalKey() networkid.PortalKey {
 	return r.PortalKey
+}
+
+func (r *FBChatResync) PortalReceiverIsUncertain() bool {
+	return r.UncertainReceiver
 }
 
 func (r *FBChatResync) ShouldCreatePortal() bool {
@@ -655,4 +667,39 @@ func (r *FBChatResync) CheckNeedsBackfill(ctx context.Context, lastMessage *data
 
 func (r *FBChatResync) GetBundledBackfillData() any {
 	return r.Backfill
+}
+
+type FBFolderResync struct {
+	PortalKey      networkid.PortalKey
+	LSUpsertFolder *table.LSUpsertFolder
+	m              *MetaClient
+}
+
+var (
+	_ bridgev2.RemoteChatResyncWithInfo       = (*FBFolderResync)(nil)
+	_ bridgev2.RemoteEventThatMayCreatePortal = (*FBFolderResync)(nil)
+)
+
+func (f *FBFolderResync) GetType() bridgev2.RemoteEventType {
+	return bridgev2.RemoteEventChatResync
+}
+
+func (f *FBFolderResync) GetPortalKey() networkid.PortalKey {
+	return f.PortalKey
+}
+
+func (f *FBFolderResync) ShouldCreatePortal() bool {
+	return true
+}
+
+func (f *FBFolderResync) AddLogContext(c zerolog.Context) zerolog.Context {
+	return c.Int64("folder_thread_id", f.LSUpsertFolder.ThreadKey)
+}
+
+func (f *FBFolderResync) GetSender() bridgev2.EventSender {
+	return bridgev2.EventSender{}
+}
+
+func (f *FBFolderResync) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	return f.m.wrapFolderInfo(f.LSUpsertFolder), nil
 }

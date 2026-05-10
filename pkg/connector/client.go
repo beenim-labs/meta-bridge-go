@@ -35,13 +35,14 @@ type MetaClient struct {
 	UserLogin *bridgev2.UserLogin
 	Ghost     *bridgev2.Ghost
 
-	stopHandlingTables atomic.Pointer[context.CancelFunc]
-	initialTable       atomic.Pointer[table.LSTable]
-	parsedTables       chan *parsedTable
-	backfillCollectors map[int64]*BackfillCollector
-	backfillLock       sync.Mutex
-	connectLock        sync.Mutex
-	stopConnectAttempt atomic.Pointer[context.CancelFunc]
+	stopHandlingTables  atomic.Pointer[context.CancelFunc]
+	initialTable        atomic.Pointer[table.LSTable]
+	initialTableHandled atomic.Bool
+	parsedTables        chan *parsedTable
+	backfillCollectors  map[int64]*BackfillCollector
+	backfillLock        sync.Mutex
+	connectLock         sync.Mutex
+	stopConnectAttempt  atomic.Pointer[context.CancelFunc]
 
 	editChannels *exsync.Map[string, chan *FBEditEvent]
 
@@ -54,6 +55,9 @@ type MetaClient struct {
 	connectWaiter         *exsync.Event
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
+
+	lastStateSave     time.Time
+	lastStateSaveLock sync.Mutex
 
 	E2EEClient      *whatsmeow.Client
 	WADevice        *store.Device
@@ -168,7 +172,7 @@ func (m *MetaClient) Connect(ctx context.Context) {
 	if m.metaState.StateEvent == "" && m.waState.StateEvent == "" {
 		// Ensure both states start at CONNECTING now
 		m.metaState.StateEvent = status.StateConnecting
-		if m.LoginMeta.Platform.IsMessenger() || m.Main.Config.IGE2EE {
+		if m.LoginMeta.Platform.IsMessenger() {
 			m.waState.StateEvent = status.StateConnecting
 		}
 		m.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
@@ -202,15 +206,19 @@ func (m *MetaClient) connectWithRetry(retryCtx, ctx context.Context, attempts in
 			zerolog.Ctx(ctx).Err(ctx.Err()).Msg("Connection cancelled during sleep")
 			return
 		}
-	} else if state, err := m.Main.DB.PopReconnectionState(ctx, m.UserLogin.ID); err != nil {
+	} else if state, lastUsed, err := m.Main.DB.GetReconnectionState(ctx, m.UserLogin.ID); err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to get reconnection state")
 	} else if state != nil {
 		if !m.Main.Config.CacheConnectionState {
 			zerolog.Ctx(ctx).Debug().Msg("Not using saved reconnection state as it's disabled in the config")
 		} else if err = cli.LoadState(state); err != nil {
-			zerolog.Ctx(ctx).Err(err).Msg("Failed to load reconnection state")
+			zerolog.Ctx(ctx).Err(err).
+				Time("last_used", lastUsed).
+				Msg("Failed to load reconnection state")
 		} else {
-			zerolog.Ctx(ctx).Debug().Msg("Reconnecting with cached state")
+			zerolog.Ctx(ctx).Debug().
+				Time("last_used", lastUsed).
+				Msg("Reconnecting with cached state")
 			m.connectWithCache(ctx)
 			return
 		}
@@ -227,6 +235,7 @@ func (m *MetaClient) connectWithRetry(retryCtx, ctx context.Context, attempts in
 			return
 		}
 	}
+	m.initialTableHandled.Store(false)
 	currentUser, initialTable, err := cli.LoadMessagesPage(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to load messages page")
@@ -341,6 +350,10 @@ func (m *MetaClient) connectWithTable(ctx context.Context, initialTable *table.L
 	m.UserLogin.RemoteProfile.Name = currentUser.GetName()
 	if !m.LoginMeta.Platform.IsMessenger() {
 		m.UserLogin.RemoteProfile.Username = currentUser.GetUsername()
+		// Instagram users may not have a displayname
+		if m.UserLogin.RemoteName == "" {
+			m.UserLogin.RemoteName = currentUser.GetUsername()
+		}
 	}
 	m.UserLogin.RemoteProfile.Avatar = m.Ghost.AvatarMXC
 
@@ -362,6 +375,7 @@ func (m *MetaClient) connectWithTable(ctx context.Context, initialTable *table.L
 func (m *MetaClient) connectWithCache(ctx context.Context) {
 	go m.handleTableLoop(ctx)
 
+	m.initialTableHandled.Store(true)
 	err := m.Client.Connect(ctx)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to connect")
@@ -468,6 +482,9 @@ func (m *MetaClient) connectE2EE() error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare e2ee client: %w", err)
 	}
+	if m.Main.Config.ProxyE2EE && m.Main.Config.Proxy != "" {
+		m.E2EEClient.SetProxyAddress(m.Main.Config.Proxy)
+	}
 	if bridgev2.PortalEventBuffer == 0 {
 		m.E2EEClient.SynchronousAck = true
 		m.E2EEClient.EnableDecryptedEventBuffer = true
@@ -480,15 +497,43 @@ func (m *MetaClient) connectE2EE() error {
 	return nil
 }
 
+func (m *MetaClient) saveConnectionState(ctx context.Context, state json.RawMessage) {
+	if !m.Main.Config.CacheConnectionState {
+		return
+	}
+	m.lastStateSaveLock.Lock()
+	ratelimited := time.Since(m.lastStateSave) < time.Minute
+	if !ratelimited {
+		m.lastStateSave = time.Now()
+	}
+	m.lastStateSaveLock.Unlock()
+	if state == nil {
+		if !ratelimited {
+			return
+		}
+		state, _ = m.Client.DumpState()
+		if state == nil {
+			return
+		}
+	}
+	err := m.Main.DB.PutReconnectionState(ctx, m.UserLogin.ID, state)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to save reconnection state")
+	} else {
+		zerolog.Ctx(ctx).Debug().Msg("Saved reconnection state")
+	}
+}
+
 func (m *MetaClient) Disconnect() {
 	state := m.disconnect(true)
-	if state != nil {
-		err := m.Main.DB.PutReconnectionState(m.UserLogin.Log.WithContext(context.Background()), m.UserLogin.ID, state)
-		if err != nil {
-			m.UserLogin.Log.Err(err).Msg("Failed to save reconnection state")
-		} else {
-			m.UserLogin.Log.Debug().Msg("Saved reconnection state")
+	if !m.initialTableHandled.Load() {
+		if state != nil {
+			m.UserLogin.Log.Warn().Msg("Initial table wasn't handled before disconnect, not saving reconnection state")
 		}
+	} else if state != nil {
+		saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		m.saveConnectionState(m.UserLogin.Log.WithContext(saveCtx), state)
 	}
 	m.metaState = status.BridgeState{}
 	m.waState = status.BridgeState{}
@@ -511,7 +556,6 @@ func (m *MetaClient) disconnect(dumpState bool) (state json.RawMessage) {
 		m.Client = nil
 	}
 	if ecli := m.E2EEClient; ecli != nil {
-		ecli.RemoveEventHandlers()
 		ecli.Disconnect()
 		m.E2EEClient = nil
 	}
@@ -559,6 +603,10 @@ func (m *MetaClient) FullReconnect() {
 	m.connectWaiter.Clear()
 	m.e2eeConnectWaiter.Clear()
 	m.disconnect(false)
+	err := m.Main.DB.DeleteReconnectionState(ctx, m.UserLogin.ID)
+	if err != nil {
+		m.UserLogin.Log.Err(err).Msg("Failed to delete cached reconnection state for full reconnect")
+	}
 	m.Connect(ctx)
 	m.lastFullReconnect = time.Now()
 }

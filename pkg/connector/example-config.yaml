@@ -10,10 +10,8 @@
 mode:
 # Should users be allowed to pick messenger.com login when mode is set to `facebook`?
 allow_messenger_com_on_fb: false
-
-# When in Instagram mode, should the bridge connect to WhatsApp servers for encrypted chats?
-# In FB/Messenger mode encryption is always enabled, this option only affects Instagram mode.
-ig_e2ee: false
+# Explicit list of allowed login methods. Overrides other login method options if non-empty.
+allowed_modes: []
 
 # Displayname template for FB/IG users. Available variables:
 #  .DisplayName - The display name set by the user.
@@ -28,6 +26,8 @@ proxy:
 get_proxy_from:
 # Should media be proxied too?
 proxy_media: false
+# Should E2EE messages be proxied too?
+proxy_e2ee: false
 # Minimum interval between full reconnects in seconds, default is 1 hour
 min_full_reconnect_interval_seconds: 3600
 # Interval to force refresh the connection (full reconnect), default is 20 hours. Set 0 to disable force refreshes.
@@ -50,6 +50,8 @@ send_presence_on_typing: false
 receive_instagram_typing_indicators: true
 # Should view-once messages be disabled entirely?
 disable_view_once: false
+# Should FB marketplace chats have a separate space inside the main Facebook space?
+marketplace_space: true
 
 # Thread backfill settings for syncing older conversations
 thread_backfill:

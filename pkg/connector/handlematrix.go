@@ -17,6 +17,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -120,6 +121,17 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				go m.FullReconnect()
 			}
 			return nil, err
+		} else if errors.Is(err, messagix.ErrConsentRequired) {
+			code := IGConsentRequired
+			if m.LoginMeta.Platform.IsMessenger() {
+				code = FBConsentRequired
+			}
+			m.UserLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateBadCredentials,
+				Error:      code,
+				UserAction: status.UserActionRestart,
+			})
+			return nil, err
 		} else if err != nil {
 			return nil, fmt.Errorf("failed to convert message: %w", err)
 		}
@@ -160,25 +172,23 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				}
 			}
 			if len(msgID) == 0 {
+				log.Warn().Any("response", resp).Msg("Message send response didn't include message ID")
 				for _, failed := range resp.LSMarkOptimisticMessageFailed {
-					if failed.OTID == otidStr {
-						log.Warn().Str("message", failed.Message).Msg("Sending message failed (optimistic)")
-						return nil, fmt.Errorf("%w: %s", ErrServerRejectedMessage, failed.Message)
-					}
+					log.Warn().Str("message", failed.Message).Msg("Sending message failed (optimistic)")
+					return nil, fmt.Errorf("%w: %s", ErrServerRejectedMessage, failed.Message)
 				}
 				for _, failed := range resp.LSHandleFailedTask {
-					if failed.OTID == otidStr {
-						log.Warn().Str("message", failed.Message).Msg("Sending message failed (task)")
-						return nil, fmt.Errorf("%w: %s", ErrServerRejectedMessage, failed.Message)
-					}
+					log.Warn().Str("message", failed.Message).Msg("Sending message failed (task)")
+					return nil, fmt.Errorf("%w: %s", ErrServerRejectedMessage, failed.Message)
 				}
-				log.Warn().Msg("Message send response didn't include message ID")
+				return nil, fmt.Errorf("%w: message send response didn't include message ID", ErrServerRejectedMessage)
 			}
 		}
 		var parsedTSTime time.Time
 		parsedTS, err := methods.ParseMessageID(msgID)
 		if err != nil {
 			log.Warn().Err(err).Str("message_id", msgID).Msg("Failed to parse message ID")
+			return nil, fmt.Errorf("%w: failed to parse message ID: %v", ErrServerRejectedMessage, err)
 		} else {
 			parsedTSTime = time.UnixMilli(parsedTS)
 			if parsedTSTime.Before(time.Now().Add(-1 * time.Hour)) {
@@ -710,11 +720,25 @@ func (m *MetaClient) HandleMatrixRoomAvatar(ctx context.Context, msg *bridgev2.M
 	if msg.Portal.RoomType == database.RoomTypeDM {
 		return false, fmt.Errorf("changing avatar not supported in DMs")
 	}
-	if m.LoginMeta.Platform == types.Instagram {
-		// TODO: implement Instagram avatar changing. IG Web doesn't support this.
-		return false, fmt.Errorf("changing avatar not supported on Instagram")
-	}
 	threadID := metaid.ParseFBPortalID(msg.Portal.ID)
+	if m.LoginMeta.Platform == types.Instagram {
+		if msg.Content.URL == "" {
+			err := m.Client.Instagram.RemoveGroupAvatar(ctx, strconv.FormatInt(threadID, 10))
+			if err != nil {
+				return false, fmt.Errorf("failed to remove Instagram avatar: %w", err)
+			}
+			return true, nil
+		}
+		data, err := m.Main.Bridge.Bot.DownloadMedia(ctx, msg.Content.URL, nil)
+		if err != nil {
+			return false, fmt.Errorf("failed to download avatar: %w", err)
+		}
+		err = m.Client.Instagram.EditGroupAvatar(ctx, strconv.FormatInt(threadID, 10), data)
+		if err != nil {
+			return false, fmt.Errorf("failed to set Instagram avatar: %w", err)
+		}
+		return true, nil
+	}
 	var imageID int64
 	if msg.Content.URL == "" {
 		// TODO: handle removing avatar. Messenger web doesn't have a remove option?

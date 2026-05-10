@@ -19,13 +19,16 @@ var ExampleConfig string
 type Config struct {
 	RawMode string         `yaml:"mode"`
 	Mode    types.Platform `yaml:"-"`
-	IGE2EE  bool           `yaml:"ig_e2ee"`
+
+	RawAllowedModes []string         `yaml:"allowed_modes"`
+	AllowedModes    []types.Platform `yaml:"-"`
 
 	AllowMessengerComOnFB bool `yaml:"allow_messenger_com_on_fb"`
 
 	Proxy        string `yaml:"proxy"`
 	GetProxyFrom string `yaml:"get_proxy_from"`
 	ProxyMedia   bool   `yaml:"proxy_media"`
+	ProxyE2EE    bool   `yaml:"proxy_e2ee"`
 
 	DisableXMABackfill bool `yaml:"disable_xma_backfill"`
 	DisableXMAAlways   bool `yaml:"disable_xma_always"`
@@ -41,6 +44,7 @@ type Config struct {
 	SendPresenceOnTyping             bool `yaml:"send_presence_on_typing"`
 	ReceiveInstagramTypingIndicators bool `yaml:"receive_instagram_typing_indicators"`
 	DisableViewOnce                  bool `yaml:"disable_view_once"`
+	MarketplaceSpace                 bool `yaml:"marketplace_space"`
 
 	ThreadBackfill ThreadBackfillConfig `yaml:"thread_backfill"`
 }
@@ -62,6 +66,17 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 
 func (c *Config) PostProcess() (err error) {
 	c.Mode = types.PlatformFromString(c.RawMode)
+	c.AllowedModes = []types.Platform{}
+	for _, rawMode := range c.RawAllowedModes {
+		mode := types.PlatformFromString(rawMode)
+		if !mode.IsValid() {
+			return fmt.Errorf("unknown mode in allowed_modes: %q", rawMode)
+		}
+		if mode == types.FacebookTor {
+			return fmt.Errorf("cannot use facebook-tor in allowed_modes, set mode instead")
+		}
+		c.AllowedModes = append(c.AllowedModes, mode)
+	}
 	c.displaynameTemplate, err = template.New("displayname").Parse(c.DisplaynameTemplate)
 	return err
 }
@@ -69,11 +84,12 @@ func (c *Config) PostProcess() (err error) {
 func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Str, "mode")
 	helper.Copy(up.Bool, "allow_messenger_com_on_fb")
-	helper.Copy(up.Bool, "ig_e2ee")
+	helper.Copy(up.List, "allowed_modes")
 	helper.Copy(up.Str, "displayname_template")
 	helper.Copy(up.Str|up.Null, "proxy")
 	helper.Copy(up.Str|up.Null, "get_proxy_from")
 	helper.Copy(up.Bool, "proxy_media")
+	helper.Copy(up.Bool, "proxy_e2ee")
 	helper.Copy(up.Int, "min_full_reconnect_interval_seconds")
 	helper.Copy(up.Int, "force_refresh_interval_seconds")
 	helper.Copy(up.Bool, "cache_connection_state")
@@ -82,6 +98,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "send_presence_on_typing")
 	helper.Copy(up.Bool, "receive_instagram_typing_indicators")
 	helper.Copy(up.Bool, "disable_view_once")
+	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Int, "thread_backfill", "batch_count")
 	helper.Copy(up.Str|up.Int, "thread_backfill", "batch_delay")
 }

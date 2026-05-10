@@ -19,6 +19,7 @@ type LSTable struct {
 	LSUpsertSyncGroupThreadsRange                    []*LSUpsertSyncGroupThreadsRange                    `json:",omitempty"`
 	LSUpsertInboxThreadsRange                        []*LSUpsertInboxThreadsRange                        `json:",omitempty"`
 	LSUpdateThreadsRangesV2                          []*LSUpdateThreadsRangesV2                          `json:",omitempty"`
+	LSUpsertFolder                                   []*LSUpsertFolder                                   `json:",omitempty"`
 	LSUpsertFolderSeenTimestamp                      []*LSUpsertFolderSeenTimestamp                      `json:",omitempty"`
 	LSSetHMPSStatus                                  []*LSSetHMPSStatus                                  `json:",omitempty"`
 	LSTruncateTablesForSyncGroup                     []*LSTruncateTablesForSyncGroup                     `json:",omitempty"`
@@ -145,6 +146,8 @@ type LSTable struct {
 	LSUpdateExtraAttachmentColumns                   []*LSUpdateExtraAttachmentColumns                   `json:",omitempty"`
 	LSMoveThreadToE2EECutoverFolder                  []*LSMoveThreadToE2EECutoverFolder                  `json:",omitempty"`
 	LSHandleFailedTask                               []*LSHandleFailedTask                               `json:",omitempty"`
+	LSIssueNewError                                  []*LSIssueNewError                                  `json:",omitempty"`
+	LSRemoveOptimisticGroupThread                    []*LSRemoveOptimisticGroupThread                    `json:",omitempty"`
 	LSUpdateOrInsertEditMessageHistory               []*LSUpdateOrInsertEditMessageHistory               `json:",omitempty"`
 	LSVerifyHybridThreadExists                       []*LSVerifyHybridThreadExists                       `json:",omitempty"`
 	LSUpdateThreadAuthorityAndMappingWithOTIDFromJID []*LSUpdateThreadAuthorityAndMappingWithOTIDFromJID `json:",omitempty"`
@@ -244,6 +247,7 @@ var SPTable = map[string]string{
 	"executeFirstBlockForSyncTransaction":            "LSExecuteFirstBlockForSyncTransaction",
 	"updateThreadsRangesV2":                          "LSUpdateThreadsRangesV2",
 	"upsertSyncGroupThreadsRange":                    "LSUpsertSyncGroupThreadsRange",
+	"upsertFolder":                                   "LSUpsertFolder",
 	"upsertFolderSeenTimestamp":                      "LSUpsertFolderSeenTimestamp",
 	"setHMPSStatus":                                  "LSSetHMPSStatus",
 	"handleRepliesOnUnsend":                          "LSHandleRepliesOnUnsend",
@@ -304,6 +308,8 @@ var SPTable = map[string]string{
 	"updateExtraAttachmentColumns":                   "LSUpdateExtraAttachmentColumns",
 	"moveThreadToE2EECutoverFolder":                  "LSMoveThreadToE2EECutoverFolder",
 	"handleFailedTask":                               "LSHandleFailedTask",
+	"issueNewError":                                  "LSIssueNewError",
+	"removeOptimisticGroupThread":                    "LSRemoveOptimisticGroupThread",
 	"updateOrInsertEditMessageHistory":               "LSUpdateOrInsertEditMessageHistory",
 	"verifyHybridThreadExists":                       "LSVerifyHybridThreadExists",
 	"updateThreadAuthorityAndMappingWithOTIDFromJID": "LSUpdateThreadAuthorityAndMappingWithOTIDFromJID",

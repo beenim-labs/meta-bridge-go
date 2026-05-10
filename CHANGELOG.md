@@ -1,3 +1,30 @@
+# v26.04
+
+* Added support for backfilling missed messages in marketplace chats.
+* Added subspace for marketplace chats.
+* Added support for more encrypted message types.
+* Added support for changing Instagram group avatars from Matrix.
+* Changed connection state caching to allow using cached state even if the
+  bridge didn't exit cleanly.
+* Fixed bridge getting stuck instead of reporting an error for certain sync
+  errors returned by Facebook servers.
+* Fixed various bugs with iOS Messenger login mode.
+* Fixed sending GIFs to encrypted chats.
+* Removed option to use encrypted chats on Instagram.
+
+# v26.02
+
+* Bumped minimum Go version to 1.25.
+* Added retrying for 5xx responses from Meta.
+* Added auto-reconnect for WhatsApp connection used for encrypted chats.
+* Added support for refreshing media URLs when using direct media.
+* Added experimental iOS Messenger login mode, which doesn't require using a
+  browser.
+* Added option to backfill all chats instead of only the most recent 20.
+* Added support for adding and removing participants in groups.
+* Adjusted backfill message fetching and probably added more bugs.
+* Changed starting chats to default to encrypted DMs on Messenger.
+
 # v25.12
 
 * Updated Docker image to Alpine 3.23.

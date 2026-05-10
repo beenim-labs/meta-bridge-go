@@ -274,6 +274,9 @@ func (s *Socket) readLoop(ctx context.Context, conn *websocket.Conn) error {
 		for {
 			select {
 			case <-ticker.C:
+				if closeErr.Load() != nil {
+					return
+				}
 				err := s.sendData([]byte{packets.PINGREQ << 4, 0})
 				if err != nil {
 					closeErr.CompareAndSwap(nil, ptr.Ptr(fmt.Errorf("failed to send ping: %w", err)))
@@ -326,8 +329,9 @@ func (s *Socket) sendData(data []byte) error {
 		closeErr := conn.Close()
 		if closeErr != nil && !errors.Is(err, net.ErrClosed) {
 			s.client.Logger.Debug().Err(closeErr).Msg("Error closing connection after network error")
+			return errors.Join(err, closeErr)
 		}
-		return errors.Join(err, closeErr)
+		return err
 	} else if err != nil {
 		return fmt.Errorf("failed to write to websocket: %w", err)
 	}

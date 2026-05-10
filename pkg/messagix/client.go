@@ -221,6 +221,7 @@ func (c *Client) configurePlatformClient() {
 		c.Facebook = &FacebookMethods{client: c}
 	case types.MessengerLite:
 		selectedEndpoints = endpoints.MessengerLiteEndpoints
+		c.Facebook = &FacebookMethods{client: c}
 		c.MessengerLite = &MessengerLiteMethods{client: c}
 	case types.Instagram:
 		selectedEndpoints = endpoints.InstagramEndpoints
@@ -275,7 +276,9 @@ func (c *Client) SetHTTP(settings exhttp.ClientSettings) {
 	if c == nil {
 		return
 	}
-	c.httpSettings = settings.WithGlobalTimeout(60 * time.Second)
+	c.httpSettings = settings.
+		WithGlobalTimeout(60 * time.Second).
+		WithResponseHeaderTimeout(20 * time.Second)
 	if c.proxyAddr != "" {
 		c.httpSettings, _ = c.httpSettings.WithProxy(c.proxyAddr)
 	}
@@ -335,7 +338,8 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			if errors.Is(err, CONNECTION_REFUSED_UNAUTHORIZED) ||
 				// TODO server unavailable may mean a challenge state, should be checked somehow
-				errors.Is(err, CONNECTION_REFUSED_SERVER_UNAVAILABLE) {
+				errors.Is(err, CONNECTION_REFUSED_SERVER_UNAVAILABLE) ||
+				errors.Is(err, CONNECTION_REFUSED_UNKNOWN_24) {
 				c.HandleEvent(ctx, &Event_PermanentError{Err: err})
 				return
 			} else if errors.Is(err, CONNECTION_REFUSED_BAD_USERNAME_OR_PASSWORD) && connectionAttempts > 5 {
@@ -524,6 +528,7 @@ func (c *Client) FetchMoreThreads(ctx context.Context, syncGroup int64) (*socket
 		return nil, nil, ErrClientIsNil
 	}
 	keyStore := c.syncManager.getSyncGroupKeyStore(syncGroup)
+	zerolog.Ctx(ctx).Debug().Any("key_store", keyStore).Msg("Current key store for thread sync")
 	if keyStore == nil || !keyStore.HasMoreBefore {
 		return nil, nil, nil // No more threads
 	}

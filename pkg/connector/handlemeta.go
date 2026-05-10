@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exmaps"
 	"golang.org/x/exp/maps"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -45,6 +46,7 @@ const (
 	FBConsentRequired          status.BridgeStateErrorCode = "fb-consent-required"
 	FBCheckpointRequired       status.BridgeStateErrorCode = "fb-checkpoint-required"
 	MetaProxyUpdateFail        status.BridgeStateErrorCode = "meta-proxy-update-fail"
+	MetaConnectError24         status.BridgeStateErrorCode = "meta-connect-error-24"
 )
 
 func init() {
@@ -65,6 +67,7 @@ func init() {
 		MetaServerUnavailable:      "Connection refused by server",
 		MetaConnectError:           "Unknown connection error",
 		MetaProxyUpdateFail:        "Failed to update proxy",
+		MetaConnectError24:         "Unknown connection error 24",
 	})
 }
 
@@ -81,7 +84,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 	case *messagix.Event_Ready:
 		log.Debug().Msg("Initial connect to Meta socket completed")
 		m.connectWaiter.Set()
-		if m.LoginMeta.Platform.IsMessenger() || m.Main.Config.IGE2EE {
+		if m.LoginMeta.Platform.IsMessenger() {
 			m.firstE2EEConnectDone = true
 			go m.tryConnectE2EE(false)
 		}
@@ -106,7 +109,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 		}
 		m.UserLogin.BridgeState.Send(m.metaState)
 	case *messagix.Event_Reconnected:
-		if !m.firstE2EEConnectDone && (m.LoginMeta.Platform.IsMessenger() || m.Main.Config.IGE2EE) {
+		if !m.firstE2EEConnectDone && m.LoginMeta.Platform.IsMessenger() {
 			m.firstE2EEConnectDone = true
 			go m.tryConnectE2EE(false)
 		}
@@ -136,6 +139,16 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 					Error:      IGChallengeRequiredMaybe,
 					UserAction: status.UserActionRestart,
 				}
+			}
+		} else if errors.Is(evt.Err, messagix.CONNECTION_REFUSED_UNKNOWN_24) {
+			m.metaState = status.BridgeState{
+				StateEvent: status.StateUnknownError,
+				Error:      MetaConnectError24,
+			}
+			if m.canReconnect() {
+				m.metaState.StateEvent = status.StateTransientDisconnect
+				log.Debug().Msg("Doing full reconnect after ConnectionCode(24)")
+				go m.FullReconnect()
 			}
 		} else {
 			m.metaState = status.BridgeState{
@@ -175,10 +188,11 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 			}
 			m.UserLogin.QueueRemoteEvent(&simplevent.Typing{
 				EventMeta: simplevent.EventMeta{
-					Type:      bridgev2.RemoteEventTyping,
-					PortalKey: m.makeFBPortalKey(threadKey, table.UNKNOWN_THREAD_TYPE),
-					Sender:    m.makeEventSender(userID),
-					Timestamp: evt.Timestamp,
+					Type:              bridgev2.RemoteEventTyping,
+					PortalKey:         m.makeFBPortalKey(threadKey, table.UNKNOWN_THREAD_TYPE),
+					UncertainReceiver: true,
+					Sender:            m.makeEventSender(userID),
+					Timestamp:         evt.Timestamp,
 				},
 				Timeout: timeout,
 				Type:    bridgev2.TypingTypeText,
@@ -232,6 +246,7 @@ func (m *MetaClient) handleTableLoop(ctx context.Context) {
 		case evt := <-m.parsedTables:
 			m.notifyBackgroundConnAboutEvent(true)
 			m.handleParsedTable(ctx, evt.IsInitial, evt.Table, evt.Events)
+			m.saveConnectionState(ctx, nil)
 			m.notifyBackgroundConnAboutEvent(false)
 		case <-ctx.Done():
 			return
@@ -320,8 +335,12 @@ func (m *MetaClient) handleParsedTable(ctx context.Context, isInitial bool, tbl 
 			return
 		}
 	}
-	if !isInitial && ctx.Err() == nil {
-		m.Client.PostHandlePublishResponse(tbl)
+	if ctx.Err() == nil {
+		if isInitial {
+			m.initialTableHandled.Store(true)
+		} else {
+			m.Client.PostHandlePublishResponse(tbl)
+		}
 	}
 }
 
@@ -339,16 +358,40 @@ func (m *MetaClient) syncGhost(ctx context.Context, info types.UserInfo) {
 func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQueue []bridgev2.RemoteEvent) {
 	threadExists := make(map[int64]*table.LSVerifyThreadExists, len(tbl.LSVerifyThreadExists))
 	threadResyncs := make(map[int64]*FBChatResync, len(tbl.LSDeleteThenInsertThread))
+	folderResyncs := make(map[int64]*FBFolderResync, len(tbl.LSUpsertFolder))
+	activeThreads := make(exmaps.Set[int64])
+	for _, vte := range tbl.LSVerifyThreadExists {
+		activeThreads.Add(vte.ThreadKey)
+	}
+	for _, uoi := range tbl.LSUpdateOrInsertThread {
+		activeThreads.Add(uoi.ThreadKey)
+	}
+	for _, inr := range tbl.LSInsertNewMessageRange {
+		activeThreads.Add(inr.ThreadKey)
+	}
+	for _, dit := range tbl.LSDeleteThenInsertThread {
+		activeThreads.Add(dit.ThreadKey)
+	}
 	params := threadMaps{
-		ctx:   ctx,
-		m:     m,
-		vtes:  threadExists,
-		syncs: threadResyncs,
+		ctx:           ctx,
+		m:             m,
+		vtes:          threadExists,
+		syncs:         threadResyncs,
+		activeThreads: activeThreads,
 	}
 	innerQueue = make([]bridgev2.RemoteEvent, 0, 8)
 
 	for _, thread := range tbl.LSVerifyThreadExists {
 		threadExists[thread.ThreadKey] = thread
+	}
+	for _, folder := range tbl.LSUpsertFolder {
+		rs := &FBFolderResync{
+			PortalKey:      m.makeFBPortalKey(folder.ThreadKey, table.FOLDER),
+			LSUpsertFolder: folder,
+			m:              m,
+		}
+		folderResyncs[folder.ThreadKey] = rs
+		innerQueue = append(innerQueue, rs)
 	}
 	for _, thread := range tbl.LSDeleteThenInsertThread {
 		threadResyncs[thread.ThreadKey] = &FBChatResync{
@@ -357,6 +400,8 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 			Raw:       thread,
 			Members:   make(map[int64]bridgev2.ChatMember, thread.MemberCount),
 			m:         m,
+
+			UncertainReceiver: thread.ThreadType == table.UNKNOWN_THREAD_TYPE,
 		}
 	}
 	// TODO resync threads with LSUpdateOrInsertThread?
@@ -368,6 +413,8 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 
 	for _, verifyExists := range threadExists {
 		if _, resyncing := threadResyncs[verifyExists.ThreadKey]; resyncing {
+			continue
+		} else if _, folder := folderResyncs[verifyExists.ThreadKey]; folder {
 			continue
 		}
 		innerQueue = append(innerQueue, &VerifyThreadExistsEvent{LSVerifyThreadExists: verifyExists, m: m})
@@ -409,6 +456,14 @@ func (m *MetaClient) parseTable(ctx context.Context, tbl *table.LSTable) (innerQ
 		}
 	}
 
+	if tbl.LSUpdateThreadsRangesV2 != nil || tbl.LSUpsertInboxThreadsRange != nil || tbl.LSUpsertSyncGroupThreadsRange != nil {
+		zerolog.Ctx(ctx).Debug().
+			Any("updateThreadsRangesV2", tbl.LSUpdateThreadsRangesV2).
+			Any("upsertInboxThreadsRange", tbl.LSUpsertInboxThreadsRange).
+			Any("upsertSyncGroupThreadsRange", tbl.LSUpsertSyncGroupThreadsRange).
+			Msg("Thread range debug data in table")
+	}
+
 	return
 }
 
@@ -420,7 +475,7 @@ func (m *MetaClient) handleMarkThreadRead(tk handlerParams, msg *table.LSMarkThr
 				return c.Int64("read_up_to", msg.LastReadWatermarkTimestampMs)
 			},
 			PortalKey:         tk.Portal,
-			UncertainReceiver: tk.UncertainReceiver,
+			UncertainReceiver: tk.IsUncertainReceiver(),
 			Sender:            m.selfEventSender(),
 		},
 		ReadUpTo: time.UnixMilli(msg.LastReadWatermarkTimestampMs),
@@ -440,7 +495,7 @@ func (m *MetaClient) handleUpdateReadReceipt(tk handlerParams, msg *table.LSUpda
 				return c.Int64("read_up_to", msg.ReadWatermarkTimestampMs)
 			},
 			PortalKey:         tk.Portal,
-			UncertainReceiver: tk.UncertainReceiver,
+			UncertainReceiver: tk.IsUncertainReceiver(),
 			Sender:            m.makeEventSender(msg.ContactId),
 			Timestamp:         timestamp,
 		},
@@ -462,7 +517,7 @@ func (m *MetaClient) handleTypingIndicator(tk handlerParams, msg *table.LSUpdate
 		EventMeta: simplevent.EventMeta{
 			Type:              bridgev2.RemoteEventTyping,
 			PortalKey:         tk.Portal,
-			UncertainReceiver: tk.UncertainReceiver,
+			UncertainReceiver: tk.IsUncertainReceiver(),
 			Sender:            m.makeEventSender(msg.SenderId),
 		},
 		Timeout: timeout,
@@ -484,7 +539,7 @@ func wrapMessageDelete(portal networkid.PortalKey, uncertain bool, messageID str
 }
 
 func (m *MetaClient) handleDeleteMessage(tk handlerParams, msg *table.LSDeleteMessage) bridgev2.RemoteEvent {
-	return wrapMessageDelete(tk.Portal, tk.UncertainReceiver, msg.MessageId)
+	return wrapMessageDelete(tk.Portal, tk.IsUncertainReceiver(), msg.MessageId)
 }
 
 func (m *MetaClient) handleDeleteThenInsertMessage(tk handlerParams, msg *table.LSDeleteThenInsertMessage) bridgev2.RemoteEvent {
@@ -495,19 +550,24 @@ func (m *MetaClient) handleDeleteThenInsertMessage(tk handlerParams, msg *table.
 			Msg("Got unexpected non-unsend DeleteThenInsertMessage command")
 		return nil
 	}
-	return wrapMessageDelete(tk.Portal, tk.UncertainReceiver, msg.MessageId)
+	return wrapMessageDelete(tk.Portal, tk.IsUncertainReceiver(), msg.MessageId)
 }
 
 func (m *MetaClient) handleDeleteThreadKey(tk handlerParams, threadKey int64, onlyForMe bool) bridgev2.RemoteEvent {
-	// TODO figure out how to handle meta's false delete events
+	// Only issue the delete if we're confident it's not a delete then insert combination
+	if tk.activeThreads.Has(threadKey) {
+		zerolog.Ctx(tk.ctx).Debug().
+			Int64("thread_key", threadKey).
+			Msg("Ignoring LSDeleteThread for thread that has active upserts in the same sync")
+		return nil
+	}
 	// Delete the thread from the sync maps to prevent future events finding it
-	delete(tk.syncs, threadKey)
 	delete(tk.vtes, threadKey)
 	return &simplevent.ChatDelete{
 		EventMeta: simplevent.EventMeta{
 			Type:              bridgev2.RemoteEventChatDelete,
 			PortalKey:         tk.Portal,
-			UncertainReceiver: tk.UncertainReceiver,
+			UncertainReceiver: tk.IsUncertainReceiver(),
 		},
 		OnlyForMe: onlyForMe,
 	}
@@ -535,10 +595,10 @@ func (m *MetaClient) handleMoveThreadToE2EE(tk handlerParams, msg *table.LSMoveT
 		ChatInfo: &bridgev2.ChatInfo{
 			ExtraUpdates: markPortalAsEncrypted,
 		},
-	})
+	}, "LSMoveThreadToE2EECutoverFolder")
 }
 
-func (m *MetaClient) wrapReaction(portalKey networkid.PortalKey, uncertainReceiver bool, sender, timestamp int64, messageID, emoji string) *simplevent.Reaction {
+func (m *MetaClient) wrapReaction(portalKey networkid.PortalKey, uncertainReceiver bool, sender int64, messageID, emoji string) *simplevent.Reaction {
 	evt := &simplevent.Reaction{
 		EventMeta: simplevent.EventMeta{
 			Type: bridgev2.RemoteEventReaction,
@@ -552,9 +612,6 @@ func (m *MetaClient) wrapReaction(portalKey networkid.PortalKey, uncertainReceiv
 		TargetMessage: metaid.MakeFBMessageID(messageID),
 		Emoji:         emoji,
 	}
-	if timestamp != 0 {
-		evt.Timestamp = time.UnixMilli(timestamp)
-	}
 	if emoji == "" {
 		evt.Type = bridgev2.RemoteEventReactionRemove
 	}
@@ -562,11 +619,11 @@ func (m *MetaClient) wrapReaction(portalKey networkid.PortalKey, uncertainReceiv
 }
 
 func (m *MetaClient) handleUpsertReaction(tk handlerParams, evt *table.LSUpsertReaction) bridgev2.RemoteEvent {
-	return m.wrapReaction(tk.Portal, tk.UncertainReceiver, evt.ActorId, evt.TimestampMs, evt.MessageId, evt.Reaction)
+	return m.wrapReaction(tk.Portal, tk.IsUncertainReceiver(), evt.ActorId, evt.MessageId, evt.Reaction)
 }
 
 func (m *MetaClient) handleDeleteReaction(tk handlerParams, evt *table.LSDeleteReaction) bridgev2.RemoteEvent {
-	return m.wrapReaction(tk.Portal, tk.UncertainReceiver, evt.ActorId, 0, evt.MessageId, "")
+	return m.wrapReaction(tk.Portal, tk.IsUncertainReceiver(), evt.ActorId, evt.MessageId, "")
 }
 
 func (m *MetaClient) handleUpdateThreadName(tk handlerParams, evt *table.LSSyncUpdateThreadName) bridgev2.RemoteEvent {
@@ -577,7 +634,7 @@ func (m *MetaClient) handleUpdateThreadName(tk handlerParams, evt *table.LSSyncU
 		ChatInfo: &bridgev2.ChatInfo{
 			Name: &evt.ThreadName,
 		},
-	})
+	}, "LSSyncUpdateThreadName")
 }
 
 func (m *MetaClient) handleSetThreadImage(tk handlerParams, evt *table.LSSetThreadImageURL) bridgev2.RemoteEvent {
@@ -588,7 +645,7 @@ func (m *MetaClient) handleSetThreadImage(tk handlerParams, evt *table.LSSetThre
 		ChatInfo: &bridgev2.ChatInfo{
 			Avatar: wrapAvatar(evt.ImageURL),
 		},
-	})
+	}, "LSSetThreadImageURL")
 }
 
 func (m *MetaClient) handleUpdateMuteSetting(tk handlerParams, evt *table.LSUpdateThreadMuteSetting) bridgev2.RemoteEvent {
@@ -609,7 +666,7 @@ func (m *MetaClient) handleUpdateMuteSetting(tk handlerParams, evt *table.LSUpda
 				MutedUntil: &mutedUntil,
 			},
 		},
-	})
+	}, "LSUpdateThreadMuteSetting")
 }
 
 func (m *MetaClient) handleAddParticipant(tk handlerParams, evt *table.LSAddParticipantIdToGroupThread) bridgev2.RemoteEvent {
@@ -623,7 +680,7 @@ func (m *MetaClient) handleAddParticipant(tk handlerParams, evt *table.LSAddPart
 				m.wrapChatMember(evt),
 			},
 		},
-	})
+	}, "LSAddParticipantIdToGroupThread")
 }
 
 func (m *MetaClient) handleSelfLeaveThread(tk handlerParams, evt *table.LSRemoveParticipantFromThread) bridgev2.RemoteEvent {
@@ -647,7 +704,7 @@ func (m *MetaClient) handleRemoveParticipant(tk handlerParams, evt *table.LSRemo
 				PrevMembership: event.MembershipJoin,
 			}},
 		},
-	})
+	}, "LSRemoveParticipantFromThread")
 }
 
 func (m *MetaClient) handleSubthread(ctx context.Context, msg *table.WrappedMessage) {
@@ -689,7 +746,7 @@ func (m *MetaClient) handleMessageInsert(tk handlerParams, msg *table.WrappedMes
 	return &FBMessageEvent{
 		WrappedMessage:    msg,
 		portalKey:         tk.Portal,
-		uncertainReceiver: tk.UncertainReceiver,
+		uncertainReceiver: tk.IsUncertainReceiver(),
 		m:                 m,
 	}
 }
@@ -725,25 +782,30 @@ type ThreadKeyable interface {
 }
 
 type threadMaps struct {
-	ctx   context.Context
-	m     *MetaClient
-	vtes  map[int64]*table.LSVerifyThreadExists
-	syncs map[int64]*FBChatResync
+	ctx           context.Context
+	m             *MetaClient
+	vtes          map[int64]*table.LSVerifyThreadExists
+	syncs         map[int64]*FBChatResync
+	activeThreads exmaps.Set[int64]
 }
 
 type handlerParams struct {
 	ctx context.Context
 
-	ID                int64
-	Type              table.ThreadType
-	Portal            networkid.PortalKey
-	UncertainReceiver bool
-	Sync              *FBChatResync
+	ID     int64
+	Type   table.ThreadType
+	Portal networkid.PortalKey
+	Sync   *FBChatResync
 
 	ThreadMsgID string
 
-	vtes  map[int64]*table.LSVerifyThreadExists
-	syncs map[int64]*FBChatResync
+	vtes          map[int64]*table.LSVerifyThreadExists
+	syncs         map[int64]*FBChatResync
+	activeThreads exmaps.Set[int64]
+}
+
+func (tk handlerParams) IsUncertainReceiver() bool {
+	return tk.Type == table.UNKNOWN_THREAD_TYPE
 }
 
 func collectPortalEvents[T ThreadKeyable](
@@ -757,13 +819,10 @@ func collectPortalEvents[T ThreadKeyable](
 		sync, syncOK := p.syncs[threadKey]
 		v, ok := p.vtes[threadKey]
 		var threadType table.ThreadType
-		uncertain := false
 		if ok {
 			threadType = v.ThreadType
 		} else if syncOK {
 			threadType = sync.Raw.ThreadType
-		} else {
-			uncertain = true
 		}
 		// TODO this check isn't needed for all types
 		parentKey, threadMsgID, err := p.m.Main.DB.GetThreadByKey(p.ctx, threadKey)
@@ -771,7 +830,6 @@ func collectPortalEvents[T ThreadKeyable](
 			zerolog.Ctx(p.ctx).Warn().Err(err).Int64("thread_key", threadKey).Msg("Failed to get subthread key")
 		} else if threadMsgID != "" {
 			threadType = table.UNKNOWN_THREAD_TYPE
-			uncertain = true
 			threadKey = parentKey
 		}
 		if fn == nil {
@@ -781,15 +839,15 @@ func collectPortalEvents[T ThreadKeyable](
 		evt := fn(handlerParams{
 			ctx: p.ctx,
 
-			ID:                threadKey,
-			Type:              threadType,
-			Portal:            p.m.makeFBPortalKey(threadKey, threadType),
-			UncertainReceiver: uncertain,
-			Sync:              sync,
-			ThreadMsgID:       threadMsgID,
+			ID:          threadKey,
+			Type:        threadType,
+			Portal:      p.m.makeFBPortalKey(threadKey, threadType),
+			Sync:        sync,
+			ThreadMsgID: threadMsgID,
 
-			vtes:  p.vtes,
-			syncs: p.syncs,
+			vtes:          p.vtes,
+			syncs:         p.syncs,
+			activeThreads: p.activeThreads,
 		}, msg)
 		if evt != nil {
 			*innerQueue = append(*innerQueue, evt)
